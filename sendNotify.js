@@ -1,3 +1,8 @@
+/******************************************
+ * 放在青龙 agluo_ql-script-hub (脚本目录) 项目中的通知
+ *****************************************/
+
+
 const querystring = require('node:querystring');
 const got = require('got');
 const timeout = 15000;
