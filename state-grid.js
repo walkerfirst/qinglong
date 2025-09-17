@@ -1314,8 +1314,10 @@ async function getVerifyCode() {
     console.log('🔚 获取验证码结束');
   }
 }
-async function login(e, o) {
-  console.log('⏳ 登录中...');
+async function login(e, o, retryCount = 0) {
+  const MAX_RETRIES = 4;
+  console.log(`⏳ 登录中... (尝试 ${retryCount + 1}/${MAX_RETRIES})`);
+  
   try {
     const r = {
       url: `/api${$api.loginTestCodeNew}`,
@@ -1343,23 +1345,57 @@ async function login(e, o) {
         },
         Channels: 'web',
       },
-    },
-      { bizrt: s } = await request(r);
-    if (!(s?.userInfo?.length > 0))
+    };
+
+    const response = await request(r);
+    const { bizrt: s } = response;
+    
+    if (!(s?.userInfo?.length > 0)) {
+      if (retryCount < MAX_RETRIES - 1) {
+        const delay = Math.pow(2, retryCount) * 1000; // Exponential backoff
+        log.warn(`登录失败，${delay/1000}秒后重试 (${retryCount + 1}/${MAX_RETRIES})`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        return login(e, o, retryCount + 1);
+      }
       return Promise.reject('登录失败: 请检查信息填写是否正确! ');
-    store.set('95598_bizrt', jsonStr(s)),
-      (Global.bizrt = s),
-      log.info('✅ 登录成功'),
-      log.debug(
-        `🔑 用户凭证: ${s.token}`,
-        `👤 用户信息: ${s.userInfo[0].nickname || s.userInfo[0].loginAccount}`
-      );
+    }
+    
+    store.set('95598_bizrt', jsonStr(s));
+    Global.bizrt = s;
+    log.info('✅ 登录成功');
+    log.debug(
+      `🔑 用户凭证: ${s.token}`,
+      `👤 用户信息: ${s.userInfo[0].nickname || s.userInfo[0].loginAccount}`
+    );
+    return true;
   } catch (e) {
-    return /验证错误/.test(e)
-      ? (log.error(`滑块验证出错, 重新登录: ${e}`), await doLogin())
-      : Promise.reject(`登陆失败: ${e}`);
+    if (e.message?.includes('O10011') || e.toString().includes('O10011')) {
+      if (retryCount < MAX_RETRIES - 1) {
+        const delay = Math.pow(2, retryCount) * 1000; // Exponential backoff
+        log.warn(`请求异常 O10011，${delay/1000}秒后重试 (${retryCount + 1}/${MAX_RETRIES})`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        return login(e, o, retryCount + 1);
+      }
+      return Promise.reject('登录失败: 多次尝试后仍然出现 O10011 错误，请稍后再试');
+    }
+    
+    if (/验证错误/.test(e)) {
+      log.error(`滑块验证出错, 重新登录: ${e}`);
+      return doLogin();
+    }
+    
+    if (retryCount < MAX_RETRIES - 1) {
+      const delay = Math.pow(2, retryCount) * 1000;
+      log.warn(`登录出错 [${e}], ${delay/1000}秒后重试 (${retryCount + 1}/${MAX_RETRIES})`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+      return login(e, o, retryCount + 1);
+    }
+    
+    return Promise.reject(`登录失败: ${e}`);
   } finally {
-    console.log('🔚 登录结束');
+    if (retryCount === 0 || retryCount === MAX_RETRIES - 1) {
+      console.log('🔚 登录结束');
+    }
   }
 }
 async function getAuthcode() {
@@ -1649,8 +1685,25 @@ async function getMonthElecQuantity(userIndex) {
   }
 }
 async function doLogin() {
-  const { code: e, ticket: o } = await getVerifyCode();
-  await login(o, e);
+  let retryCount = 0;
+  const maxRetries = 3;
+  while (retryCount < maxRetries) {
+    try {
+      await getKeyCode();
+      const { code, ticket } = await getVerifyCode();
+      await login(ticket, code);
+      break;
+    } catch (e) {
+      if (e.message.includes('O10011')) {
+        retryCount++;
+        console.log(`登录失败，错误代码：${e.message}，重试次数：${retryCount}/${maxRetries}`);
+        await new Promise(resolve => setTimeout(resolve, 1000)); // 等待1秒后重试
+      } else {
+        log.error(`登录过程中出错: ${e}`);
+        throw e; // Re-throw to be caught by the main execution flow
+      }
+    }
+  }
 }
 async function showNotice() {
   // console.log(''),
@@ -1695,7 +1748,8 @@ async function sendMsg(title, eleBill = {}, dayList = [], monthElecQuantity = {}
       .map(month => ({
         ...month,
         month: formatDate(month.month),
-        elecNum: month.elecNum || '0'
+        elecNum: month.elecNum || month.monthEleNum || '0',
+        elecCost: month.elecCost || month.monthEleCost || '0.00'
       }));
     
     // 确保 dataInfo 存在
@@ -1724,6 +1778,23 @@ async function sendMsg(title, eleBill = {}, dayList = [], monthElecQuantity = {}
       content += `预存电费: ${eleBill.prepayBal} 元\n`;
     }
     
+    // 添加月度用电量信息
+    if (monthList.length > 0) {
+      content += '\n【月度用电量】\n';
+      monthList.forEach(month => {
+        content += `${month.month}: ${month.elecNum} 度 (¥${parseFloat(month.elecCost).toFixed(2)})\n`;
+      });
+      
+      if (dataInfo.totalEleNum) {
+        const avgCost = dataInfo.totalEleNum > 0 
+          ? (parseFloat(dataInfo.totalEleCost) / parseFloat(dataInfo.totalEleNum)).toFixed(4)
+          : '0.0000';
+        content += `\n${dataInfo.year}年总用电量: ${dataInfo.totalEleNum} 度\n`;
+        content += `${dataInfo.year}年总电费: ¥${parseFloat(dataInfo.totalEleCost || '0').toFixed(2)}\n`;
+        content += `平均电价: ¥${avgCost}/度\n`;
+      }
+    }
+    
     // 添加日用电量
     if (validDayList.length > 0) {
       content += `\n【最近${validDayList.length}天用电量】\n`;
@@ -1732,28 +1803,7 @@ async function sendMsg(title, eleBill = {}, dayList = [], monthElecQuantity = {}
       });
     }
     
-    // 添加月用电统计
-    if (dataInfo) {
-      content += '\n【年度用电统计】\n';
-      content += `总用电量: ${dataInfo.totalEleNum || 0} 度\n`;
-      content += `总电费: ${dataInfo.totalEleCost || 0} 元\n`;
-    }
-    
-    // 添加月用电量明细
-    if (monthList && monthList.length > 0) {
-      content += `\n【最近${monthList.length}个月用电明细】\n`;
-      monthList.forEach(month => {
-        const monthStr = month.month;
-        const year = monthStr.substring(0, 4);
-        const monthNum = monthStr.substring(4);
-        const elecNum = month.monthEleNum || 0;
-        const displayNum = month._isPlaceholder ? 0 : elecNum;
-        content += `${year}年${monthNum}月: ${displayNum} 度\n`;
-      });
-    } else {
-      content += '\n【月度用电明细】\n';
-      content += '没有可用的月用电量数据\n';
-    }
+    // 月度用电量明细已在上面显示，此处移除重复内容
     
     // 添加时间戳
     content += `\n更新时间: ${new Date().toLocaleString()}`;
