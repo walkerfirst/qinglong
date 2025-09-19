@@ -1286,71 +1286,34 @@ async function getKeyCode() {
     console.log('🔚 获取keyCode和publicKey结束');
   }
 }
-async function getVerifyCode(maxRetries = 4, retryDelay = 12000) {
+async function getVerifyCode() {
   console.log('⏳ 获取验证码...');
-  let lastError;
-  
   try {
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        log.debug(`🔍 尝试获取验证码 (${attempt}/${maxRetries})...`);
-        
-        const e = {
-          url: `/api${$api.loginVerifyCodeNew}`,
-          method: 'post',
-          data: {
-            password: PASSWORD,
-            account: USERNAME,
-            canvasHeight: 200,
-            canvasWidth: 310,
-          },
-          headers: { 
-            ...requestKey,
-            'Cache-Control': 'no-cache',
-            'Pragma': 'no-cache',
-            'Expires': '0'
-          },
-        };
-        
-        const o = await request(e);
-        
-        if (!o || !o.ticket || !o.canvasSrc) {
-          throw new Error('无效的验证码响应');
-        }
-        
-        log.info('✅ 获取验证码凭证成功');
-        log.debug(`🔑 验证码凭证: ${o.ticket}`);
-        
-        // 验证码识别
-        const { data: r } = await Recoginze(o.canvasSrc);
-        
-        if (!r) {
-          throw new Error('验证码识别失败');
-        }
-        
-        log.info('✅ 识别验证码成功');
-        log.debug(`🔑 验证码: ${r}`);
-        
-        return { code: r, ticket: o.ticket };
-        
-      } catch (e) {
-        lastError = e;
-        const errorMsg = e.message || String(e);
-        
-        if (attempt < maxRetries) {
-          log.warn(`⚠️ 获取验证码失败 (${attempt}/${maxRetries}): ${errorMsg}`);
-          log.info(`⏳ ${retryDelay / 1000}秒后重试...`);
-          await new Promise(resolve => setTimeout(resolve, retryDelay));
-        }
-      }
-    }
-    
-    throw new Error(`获取验证码失败: ${lastError?.message || '未知错误'} (已重试 ${maxRetries}次)`);
+    const e = {
+      url: `/api${$api.loginVerifyCodeNew}`,
+      method: 'post',
+      data: {
+        password: PASSWORD,
+        account: USERNAME,
+        canvasHeight: 200,
+        canvasWidth: 310,
+      },
+      headers: { ...requestKey },
+    },
+      o = await request(e);
+    log.info('✅ 获取验证码凭证成功'), log.debug(`🔑 验证码凭证: ${o.ticket}`);
+    const { data: r } = await Recoginze(o.canvasSrc);
+    return (
+      log.info('✅ 识别验证码成功'),
+      log.debug(`🔑 验证码: ${r}`),
+      { code: r, ticket: o.ticket }
+    );
+  } catch (e) {
+    return Promise.reject('获取验证码失败: ' + e);
   } finally {
     console.log('🔚 获取验证码结束');
   }
 }
-
 async function login(e, o, retryCount = 0) {
   const MAX_RETRIES = 4;
   console.log(`⏳ 登录中... (尝试 ${retryCount + 1}/${MAX_RETRIES})`);
