@@ -1293,7 +1293,7 @@ async function getVerifyCode(maxRetries = 4, retryDelay = 12000) {
   try {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        log.debug(`🔍 尝试获取验证码 (${attempt}/${maxRetries})...`);
+        log.info(`🔍 尝试获取验证码 (${attempt}/${maxRetries})...`);
         
         const e = {
           url: `/api${$api.loginVerifyCodeNew}`,
@@ -1406,7 +1406,10 @@ async function login(e, o, retryCount = 0) {
     );
     return true;
   } catch (e) {
-    if (e.message?.includes('O10011') || e.toString().includes('O10011')) {
+    const errorMessage = e?.message || String(e || '未知错误');
+    
+    // 处理 O10011 错误
+    if (errorMessage.includes('O10011')) {
       if (retryCount < MAX_RETRIES - 1) {
         const delay = Math.pow(2, retryCount) * 1000; // Exponential backoff
         log.warn(`请求异常 O10011，${delay/1000}秒后重试 (${retryCount + 1}/${MAX_RETRIES})`);
@@ -1416,42 +1419,77 @@ async function login(e, o, retryCount = 0) {
       return Promise.reject('登录失败: 多次尝试后仍然出现 O10011 错误，请稍后再试');
     }
     
-    if (/验证错误/.test(e)) {
-      log.error(`滑块验证出错, 重新登录: ${e}`);
+    // 处理验证错误
+    if (/验证错误/.test(errorMessage)) {
+      log.error(`滑块验证出错, 重新登录: ${errorMessage}`);
       return doLogin();
     }
     
+    // 其他错误的重试逻辑
     if (retryCount < MAX_RETRIES - 1) {
       const delay = Math.pow(2, retryCount) * 1000;
-      log.warn(`登录出错 [${e}], ${delay/1000}秒后重试 (${retryCount + 1}/${MAX_RETRIES})`);
+      log.warn(`登录出错 [${errorMessage}], ${delay/1000}秒后重试 (${retryCount + 1}/${MAX_RETRIES})`);
       await new Promise(resolve => setTimeout(resolve, delay));
       return login(e, o, retryCount + 1);
     }
     
-    return Promise.reject(`登录失败: ${e}`);
+    return Promise.reject(`登录失败: ${errorMessage}`);
   } finally {
     if (retryCount === 0 || retryCount === MAX_RETRIES - 1) {
       console.log('🔚 登录结束');
     }
   }
 }
-async function getAuthcode() {
+async function getAuthcode(maxRetries = 3, retryDelay = 20000) {
   console.log('⏳ 获取授权码...');
+  let lastError;
+  
   try {
-    const e = {
-      url: `/api${$api.getAuth}`,
-      method: 'post',
-      headers: { ...requestKey, token: bizrt.token },
-    },
-      { redirect_url: o } = await request(e);
-    (Global.authorizecode = o.split('code=')[1]),
-      log.info('✅ 获取授权码成功'),
-      log.debug(`🔑 授权码: ${authorizecode}`);
-  } catch (e) {
-    return Promise.reject(`获取授权码失败: ${e}`);
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        log.info(`🔍 尝试获取授权码 (${attempt}/${maxRetries})...`);
+        
+        const e = {
+          url: `/api${$api.getAuth}`,
+          method: 'post',
+          headers: { 
+            ...requestKey, 
+            token: bizrt.token,
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache',
+            'Expires': '0'
+          },
+        };
+        
+        const { redirect_url: o } = await request(e);
+        
+        if (!o || !o.includes('code=')) {
+          throw new Error('无效的授权码响应');
+        }
+        
+        Global.authorizecode = o.split('code=')[1].split('&')[0];
+        log.info('✅ 获取授权码成功');
+        log.debug(`🔑 授权码: ${Global.authorizecode}`);
+        return Global.authorizecode;
+        
+      } catch (e) {
+        lastError = e;
+        const errorMsg = e.message || String(e);
+        
+        if (attempt < maxRetries) {
+          log.warn(`⚠️ 获取授权码失败 (${attempt}/${maxRetries}): ${errorMsg}`);
+          log.info(`⏳ ${retryDelay/1000}秒后重试...`);
+          await new Promise(resolve => setTimeout(resolve, retryDelay));
+        } else {
+          throw e; // Re-throw on last attempt
+        }
+      }
+    }
   } finally {
     console.log('🔚 获取授权码结束');
   }
+  
+  return Promise.reject(`获取授权码失败: ${lastError?.message || '未知错误'} (已重试 ${maxRetries}次)`);
 }
 async function getAccessToken() {
   console.log('⏳ 获取凭证...');
